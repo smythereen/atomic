@@ -45,7 +45,7 @@ cd ~/atomic && make header
 
 ## System prerequisites
 
-- gcc with x86 inline asm (`lock` / `xaddl` / `cmpxchg*`).
+- gcc (C) or g++ (compatible C++ header/bridge usage below) with x86 inline asm (`lock` / `xaddl` / `cmpxchg*`).
 - [sys](https://github.com/smythereen/sys) headers (`common.h`) present in
   `~/cmn` before any translation unit includes these headers.
 
@@ -98,6 +98,105 @@ No `-lsys` / `-lsem` required for this program.
 ## Version
 
 Release tag: `v0.2.0` (documentation update; version number unchanged).
+
+## Using this unit from C++
+
+This unit can be used from **C and C++**. Keep the unit's `.c` implementation
+files compiled as C with `gcc`/`CC`; compile your C++ client with `g++`/`CXX`
+and use `g++` for the final mixed-language link. There is no need to rebuild
+the C library as C++.
+
+Base's shared rules recognize C++ product sources named `.cc` and compile
+them with `CXX` and `CXXFLAGS` (for example `make CXX=g++`). `CPP` names
+the preprocessor, not the C++ compiler. The commands below assume the
+headers and libraries have already been installed into `$HOME/cmn` and
+`$HOME/lib`. GNU C++17 on Linux x86-64 is the example target; GNU extensions
+in the shared types/headers are intentional.
+
+`atomic_32.h` can be included directly in C++: its operations are macros
+and `static inline` functions, so there are no external library symbols to
+mangle and no `-latomic` link flag for this unit. `common.h` provides its own
+C-linkage guard. The same x86 instruction/alignment constraints apply in both
+languages.
+
+**Current header caveat:** `cmpxchg.h` and `atomic_bump.h` use `new` as a
+parameter and assembly-operand name. That is a C++ keyword.
+`atomic_bump.h` also uses the removed C++17 `register` storage specifier,
+which Clang diagnoses. An `extern "C"` block does **not** make
+that syntax valid C++. Use the directly compatible `atomic_32.h` operations
+where suitable, or put calls to those other two headers behind a small
+C-compiled bridge, as shown below. This uses the existing unit unchanged;
+it is not a claim that those headers parse directly as C++.
+
+Save as `use_atomic.cc`:
+
+```cpp
+#include <atomic_32.h>
+int main() {
+    atom_32 count = ATOMIC_INIT(0);
+    s32_inc(&count);
+    return S32_Read(&count) != 1;
+}
+```
+
+```sh
+g++ -std=gnu++17 -I"$HOME/cmn" use_atomic.cc -L"$HOME/lib"  -o use_atomic
+./use_atomic
+```
+
+For `Atomic_Bump` / `CompareAndExchange`, create these project-local files.
+Do not include the affected atomic headers in the C++ translation unit.
+
+`atomic_bridge.h` (the **application's** C/C++ boundary):
+
+```c
+#ifndef APP_ATOMIC_BRIDGE_H
+#define APP_ATOMIC_BRIDGE_H
+#include <common.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+u32 app_bump(u32 *value);
+u32 app_compare_exchange(u32 *value, u32 expected, u32 replacement);
+#ifdef __cplusplus
+}
+#endif
+#endif
+```
+
+`atomic_bridge.c` (compile as C, never with `g++`):
+
+```c
+#include "atomic_bridge.h"
+#include <atomic_bump.h>
+u32 app_bump(u32 *value) { return Atomic_Bump(value); }
+u32 app_compare_exchange(u32 *value, u32 expected, u32 replacement) {
+    return CompareAndExchange(value, expected, replacement);
+}
+```
+
+`bridge_demo.cc`:
+
+```cpp
+#include "atomic_bridge.h"
+int main() {
+    u32 value = 0;
+    if (app_bump(&value) != 1) return 1;
+    return app_compare_exchange(&value, 1, 2) == 1 && value == 2 ? 0 : 1;
+}
+```
+
+```sh
+gcc -std=gnu11 -I"$HOME/cmn" -c atomic_bridge.c -o atomic_bridge.o
+g++ -std=gnu++17 -I"$HOME/cmn" bridge_demo.cc atomic_bridge.o -o bridge_demo
+./bridge_demo
+```
+
+The C++ example above was compiled, linked and run on Linux x86-64 using
+Clang 22.1.8 via `zig c++ -std=gnu++17 -nostdlib++`, with GCC 14.2-built C
+objects where needed. It uses no C++ standard-library runtime. The `g++`
+command is the GNU-toolchain form; that driver was not available for this
+smoke check. This is not an exhaustive API or concurrency test.
 
 ## License
 
